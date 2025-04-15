@@ -36,6 +36,22 @@ from .. import architectures, mkinitramfs, modfinder, qemu_helpers, resources, v
 from ..util import SilentError, find_binary_or_raise, get_username
 
 
+class KwargsAppendAction(argparse.Action):
+    def __call__(self, parser, namespace, pairs, option_string=None):
+        for pair in pairs:
+            try:
+                key, value = pair.split("=")
+            except ValueError as error:
+                raise argparse.ArgumentError(
+                    self, f'Could not parse argument "{pair}" as key=value format'
+                ) from error
+            d = getattr(namespace, self.dest) or {}
+            values = d.get(key, [])
+            values.append(value)
+            d[key] = values
+            setattr(namespace, self.dest, d)
+
+
 def make_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Virtualize your system (or another) under a kernel image",
@@ -290,6 +306,18 @@ def make_parser() -> argparse.ArgumentParser:
         "--save-initramfs",
         action="store",
         help="Save the generated initramfs to the specified path",
+    )
+    g.add_argument(
+        "--confidential-guest",
+        action="store_true",
+        help="Prepare image for confidential guest",
+    )
+    g.add_argument(
+        "--confidential-guest-args",
+        nargs="+",
+        action=KwargsAppendAction,
+        metavar="KEY=VALUE",
+        help="Add key-value parameters.",
     )
     g.add_argument(
         "--show-boot-console",
@@ -1838,10 +1866,24 @@ def do_it() -> int:
     # sure that 'init=' appears directly before '--'.
     kernelargs.extend(initcmds)
 
-    # Load a normal kernel
-    qemuargs.extend(["-kernel", kernel.kimg])
+    kernel_cmdline = " ".join(quote_karg(a) for a in kernelargs)
+    if args.confidential_guest:
+        qemuargs.extend(arch.qemu_confidential_guest_args())
+        output = arch.qemu_confidential_guest_img_preparation(
+            kernel=kernel.kimg,
+            cmdline=kernel_cmdline,
+            initrd=initrdpath,
+            **args.confidential_guest_args,
+        )
+        if output is not None:
+            kimg = output.name
+    else:
+        kimg = kernel.kimg
+
+    # Load the kernel
+    qemuargs.extend(["-kernel", kimg])
     if kernelargs:
-        qemuargs.extend(["-append", " ".join(quote_karg(a) for a in kernelargs)])
+        qemuargs.extend(["-append", kernel_cmdline])
     if initrdpath is not None:
         qemuargs.extend(["-initrd", initrdpath])
     if kernel.dtb is not None:
