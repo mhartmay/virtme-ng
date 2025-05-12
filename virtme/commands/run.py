@@ -1308,7 +1308,7 @@ def do_it() -> int:
             "init=/bin/sh",
             "--",
             "-c",
-            ";".join(
+            "; ".join(
                 [
                     "mount -t tmpfs run /run",
                     "mkdir -p /run/virtme/guesttools",
