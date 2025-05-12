@@ -267,9 +267,16 @@ virtme-ng is based on virtme, written by Andy Lutomirski <luto@kernel.org>.
     )
 
     parser.add_argument(
+        "--root-distribution",
+        action="store",
+        default="ubuntu",
+        help="Use a target distribution to create a new chroot (used with --root)",
+    )
+
+    parser.add_argument(
         "--root-release",
         action="store",
-        help="Use a target Ubuntu release to create a new chroot (used with --root)",
+        help="Use a target distribution release to create a new chroot (used with --root)",
     )
 
     parser.add_argument(
@@ -625,13 +632,15 @@ git reset --hard __virtme__
 """
 
 
-def create_root(destdir, arch, release):
+def create_root(destdir, arch, distribution, release, *, mkosi=False):
     """Initialize a rootfs directory, populating files/directory if it doesn't exist."""
     if os.path.exists(destdir):
         return
-    # Use Ubuntu's cloud images to create a rootfs, these images are fairly
-    # small and they provide a nice environment to test kernels.
-    if release is None:
+
+    if distribution is None:
+        distribution = "ubuntu"
+
+    if release is None and distribution == "ubuntu":
         try:
             release = (
                 check_output("lsb_release -s -c", shell=True)
@@ -645,15 +654,38 @@ def create_root(destdir, arch, release):
                 "Unknown release, try specifying an Ubuntu release with --root-release"
             )
             sys.exit(1)
-    url = (
-        "https://cloud-images.ubuntu.com/"
-        + f"{release}/current/{release}-server-cloudimg-{arch}-root.tar.xz"
-    )
-    prevdir = os.getcwd()
-    os.system(f"sudo mkdir -p {destdir}")
-    os.chdir(destdir)
-    os.system(f"curl -s {url} | sudo tar xvJ")
-    os.chdir(prevdir)
+
+    if distribution != "ubuntu" or mkosi:
+        output_directory, output_name = (
+            os.path.dirname(destdir),
+            os.path.basename(destdir),
+        )
+        check_output(
+            [
+                "mkosi",
+                f"--architecture={arch}",
+                f"--release={release}",
+                f"--distribution={distribution}",
+                "--format=directory",
+                f"--output-directory={output_directory}",
+                f"--output={output_name}",
+                "--bootable=no",
+                "--package=busybox",
+                "build",
+            ]
+        )
+    else:
+        # Use Ubuntu's cloud images to create a rootfs, these images are fairly
+        # small and they provide a nice environment to test kernels.
+        url = (
+            "https://cloud-images.ubuntu.com/"
+            + f"{release}/current/{release}-server-cloudimg-{arch}-root.tar.xz"
+        )
+        prevdir = os.getcwd()
+        os.system(f"sudo mkdir -p {destdir}")
+        os.chdir(destdir)
+        os.system(f"curl -s {url} | sudo tar xvJ")
+        os.chdir(prevdir)
 
 
 def get_host_arch():
@@ -943,7 +975,12 @@ class KernelSource:
 
     def _get_virtme_root(self, args):
         if args.root is not None:
-            create_root(args.root, args.arch or get_host_arch(), args.root_release)
+            create_root(
+                args.root,
+                args.arch or get_host_arch(),
+                args.root_distribution,
+                args.root_release,
+            )
             self.virtme_param["root"] = f"--root {args.root}"
         else:
             self.virtme_param["root"] = ""
