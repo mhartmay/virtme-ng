@@ -53,6 +53,9 @@ fi
 cat "${SSH_HOME}"/.ssh/id_*.pub >> "${SSH_AUTH_KEYS}" 2> /dev/null
 cat "${SSH_CACHE}"/id_virtme.pub >> "${SSH_AUTH_KEYS}"
 
+# Ignore any errors, e.g. no authentication agent is running
+ssh-add -L >> "${SSH_AUTH_KEYS}" 2> /dev/null || true
+
 # fixup permissions
 chown -R root:root "${SSH_DIR}"/etc/ssh
 chmod 600 "${SSH_DIR}"/etc/ssh/ssh_host_*_key
