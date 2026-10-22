@@ -10,6 +10,7 @@ import contextlib
 import io
 import os
 import shlex
+import socket
 import stat
 import subprocess
 import tempfile
@@ -327,6 +328,36 @@ class DaemonStartupTests(FakeDaemonTestCase):
             _, started = self.start_daemon(_rootfs_config(), verbose=True)
         self.assertFalse(started)
         self.assertIn("failed to start virtiofsd", stderr.getvalue())
+
+
+class IsSocketTests(unittest.TestCase):
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+
+    def test_true_for_unix_socket(self):
+        path = os.path.join(self.tempdir.name, "sock")
+        daemon_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        daemon_sock.bind(path)
+        daemon_sock.close()
+        self.assertTrue(VirtioFS._is_socket(path))
+
+    def test_false_for_socket_of_another_user(self):
+        # A local user could bind a socket of their own at the path; see the
+        # docstring of _is_socket().
+        foreign = mock.MagicMock(st_mode=stat.S_IFSOCK, st_uid=os.geteuid() + 1)
+        with mock.patch("virtme_ng.virtiofs.os.stat", return_value=foreign):
+            self.assertFalse(VirtioFS._is_socket("ignored"))
+
+    def test_false_for_regular_file(self):
+        path = os.path.join(self.tempdir.name, "file")
+        with open(path, "w", encoding="utf-8") as fd:
+            fd.write("")
+        self.assertFalse(VirtioFS._is_socket(path))
+
+    def test_false_for_missing_path(self):
+        path = os.path.join(self.tempdir.name, "nonexistent")
+        self.assertFalse(VirtioFS._is_socket(path))
 
 
 class ExportVirtiofsTests(FakeDaemonTestCase):

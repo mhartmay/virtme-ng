@@ -3,6 +3,7 @@
 import atexit
 import os
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -81,6 +82,19 @@ class VirtioFS:
         return None
 
     @staticmethod
+    def _is_socket(path):
+        """Whether PATH is a socket owned by the current user.
+
+        The path is visible in /proc/*/cmdline: a local user could race the
+        daemon and bind their own socket there, which QEMU would connect to.
+        """
+        try:
+            st = os.stat(path)
+            return stat.S_ISSOCK(st.st_mode) and st.st_uid == os.geteuid()
+        except OSError:
+            return False
+
+    @staticmethod
     def _supports_readonly(path):
         if _VIRTIOFSD_READONLY_SUPPORT["value"] is not None:
             return _VIRTIOFSD_READONLY_SUPPORT["value"]
@@ -141,7 +155,7 @@ class VirtioFS:
         # but avoid adding a full 100ms delay when the daemon starts quickly.
         deadline = monotonic() + 3.1
         waiting_logged = False
-        while not os.path.exists(self.pid):
+        while not self._is_socket(self.sock):
             remaining = deadline - monotonic()
             if remaining <= 0:
                 if verbose:
