@@ -3,17 +3,17 @@
 import atexit
 import ctypes
 import os
+import re
 import signal
 import stat
 import subprocess
 import sys
 import tempfile
+from functools import lru_cache
 from shutil import which
 from time import monotonic, sleep
 
 from virtme import architectures
-
-_VIRTIOFSD_READONLY_SUPPORT: dict[str, bool | None] = {"value": None}
 
 _PR_SET_PDEATHSIG = 1
 
@@ -128,10 +128,9 @@ class VirtioFS:
             return False
 
     @staticmethod
-    def _supports_readonly(path):
-        if _VIRTIOFSD_READONLY_SUPPORT["value"] is not None:
-            return _VIRTIOFSD_READONLY_SUPPORT["value"]
-
+    @lru_cache
+    def _get_virtiofsd_help(path) -> str:
+        """Cached `--help` output of the virtiofsd at PATH ("" if unavailable)."""
         try:
             result = subprocess.run(
                 [path, "--help"],
@@ -141,12 +140,26 @@ class VirtioFS:
                 check=False,
             )
         except OSError:
-            supported = False
-        else:
-            supported = result.returncode == 0 and "--readonly" in result.stdout
+            return ""
+        return result.stdout if result.returncode == 0 else ""
 
-        _VIRTIOFSD_READONLY_SUPPORT["value"] = supported
-        return supported
+    @staticmethod
+    def _supports_flag(path, flag) -> bool:
+        """Whether the `--help` output lists FLAG as a whole word.
+
+        The formatting differs across virtiofsd versions, and --readonly
+        must not match --readonly-mode.
+        """
+        return (
+            re.search(
+                rf"{re.escape(flag)}(?![\w-])", VirtioFS._get_virtiofsd_help(path)
+            )
+            is not None
+        )
+
+    @staticmethod
+    def _supports_readonly(path):
+        return VirtioFS._supports_flag(path, "--readonly")
 
     def _report_9p_fallback(self, verbose):
         if verbose:

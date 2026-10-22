@@ -17,7 +17,6 @@ import tempfile
 import unittest
 from unittest import mock
 
-import virtme_ng.virtiofs
 from virtme_ng.virtiofs import (
     VirtioFS,
     VirtioFSConfig,
@@ -100,15 +99,8 @@ class FakeDaemonTestCase(unittest.TestCase):
         self.guest_tools = self.tempdir.name
         self.daemon = os.path.join(self.guest_tools, "bin", "virtiofsd")
         self.make_daemon(self.daemon)
-        # The --readonly support check caches its result globally so far:
-        # reset it, or the first test's daemon would decide for all others.
-        patcher = mock.patch.dict(
-            virtme_ng.virtiofs._VIRTIOFSD_READONLY_SUPPORT, value=None
-        )
-        patcher.start()
-        self.addCleanup(patcher.stop)
 
-    def make_daemon(self, path, *, help_text="", role="serve", version_rc=0):
+    def make_daemon(self, path, *, help_text="", help_rc=0, role="serve", version_rc=0):
         """(Re-)install a fake virtiofsd at PATH.
 
         The daemon answers the --version and --help probes and records the
@@ -130,7 +122,7 @@ class FakeDaemonTestCase(unittest.TestCase):
 for arg in "$@"; do
     case $arg in
     --version) exit {version_rc} ;;
-    --help) printf %s {shlex.quote(help_text)}; exit 0 ;;
+    --help) printf %s {shlex.quote(help_text)}; exit {help_rc} ;;
     esac
 done
 printf '%s\\0' '@@run@@' "$0" "$@" >> {shlex.quote(path + ".argv")}
@@ -328,6 +320,22 @@ class DaemonStartupTests(FakeDaemonTestCase):
         self.assertIn("--readonly", argv)
 
     def test_readonly_dropped_when_not_advertised(self):
+        _, started = self.start_daemon(_rootfs_config())
+        self.assertTrue(started)
+        (argv,) = self.daemon_runs(self.daemon)
+        self.assertNotIn("--readonly", argv)
+
+    def test_readonly_dropped_when_only_a_longer_flag_matches(self):
+        # --readonly-mode is not --readonly: a prefix match would silently
+        # pass an unsupported flag to the daemon.
+        self.make_daemon(self.daemon, help_text="--readonly-mode")
+        _, started = self.start_daemon(_rootfs_config())
+        self.assertTrue(started)
+        (argv,) = self.daemon_runs(self.daemon)
+        self.assertNotIn("--readonly", argv)
+
+    def test_flags_dropped_when_the_help_query_fails(self):
+        self.make_daemon(self.daemon, help_text="--readonly", help_rc=1)
         _, started = self.start_daemon(_rootfs_config())
         self.assertTrue(started)
         (argv,) = self.daemon_runs(self.daemon)
