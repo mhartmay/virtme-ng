@@ -297,6 +297,7 @@ class DaemonStartupTests(FakeDaemonTestCase):
         self.assertIn("--no-announce-submounts", argv)
         self.assertEqual(self.flag_value(argv, "--shared-dir"), "/")
         self.assertEqual(self.flag_value(argv, "--socket-path"), fs.sock)
+        self.assertTrue(fs.sock.endswith(".sock"))
         self.assertEqual(self.flag_value(argv, "--sandbox"), "none")
         self.assertEqual(self.flag_value(argv, "--cache"), "always")
         self.assertNotIn("--posix-acl", argv)
