@@ -663,6 +663,18 @@ class CleanupTests(FakeDaemonTestCase):
         self.assertFalse(os.path.exists(fs.sock))
         self.assertFalse(os.path.exists(fs.sock + ".pid"))
 
+    def test_kills_a_daemon_that_ignores_sigterm(self):
+        self.make_daemon(self.daemon, role="stubborn")
+        fs, started = self.start_daemon(_rootfs_config())
+        self.assertTrue(started)
+
+        fs.shutdown()
+
+        # SIGTERM was ignored: the daemon was killed anyway.
+        fs.proc.wait(timeout=5)
+        self.assertLess(fs.proc.returncode, 0)
+        self.assertFalse(os.path.exists(fs.sock))
+
 
 class NoRootUidMapCliTests(unittest.TestCase):
     def test_parser_defaults_to_false(self):

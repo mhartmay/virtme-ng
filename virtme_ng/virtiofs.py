@@ -81,10 +81,19 @@ class VirtioFS:
         self.guest_tools_path = guest_tools_path
 
     def shutdown(self):
-        # Make sure to kill virtiofsd instances that are still potentially running
+        """Stop the daemon (SIGTERM, then SIGKILL) and remove its temp files."""
         if self.proc is not None:
             try:
                 self.proc.terminate()
+                self.proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                # Even SIGKILL may fail; shutdown must never abort the VM
+                # launch/exit path.
+                try:
+                    self.proc.kill()
+                    self.proc.wait(timeout=5)
+                except (subprocess.TimeoutExpired, PermissionError):
+                    pass
             except PermissionError:
                 pass
         # Clean up temp files (virtiofsd creates a pid file next to the socket
