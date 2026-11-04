@@ -168,7 +168,7 @@ printf '%s\\0' '@@run@@' "$0" "$@" >> {shlex.quote(path + ".argv")}
 
         def cleanup():
             if fs.sock is not None:
-                fs._cleanup_virtiofs_temp_files()
+                fs.shutdown()
 
         self.addCleanup(cleanup)
         started = fs.start(
@@ -441,7 +441,7 @@ class CleanupTests(FakeDaemonTestCase):
         fs, started = self.start_daemon(_rootfs_config())
         self.assertTrue(started)
 
-        fs._cleanup_virtiofs_temp_files()
+        fs.shutdown()
 
         # The daemon was told to stop and is gone, together with its files.
         fs.proc.wait(timeout=5)
