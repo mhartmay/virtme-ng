@@ -14,7 +14,6 @@ import socket
 import stat
 import subprocess
 import tempfile
-import time
 import unittest
 from unittest import mock
 
@@ -121,7 +120,10 @@ class FakeDaemonTestCase(unittest.TestCase):
         """
         extra = {
             "stubborn": "import signal\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)",
-            "bind-exit": "sys.exit(3)",
+            # Exit hard, without the interpreter finalization: the daemon
+            # must be dead before its socket can be seen, or the readiness
+            # check races with a still-dying process.
+            "bind-exit": "os._exit(3)",
         }.get(role, "")
         server = _SERVER.format(ready=role != "hang", extra=extra)
         script = f"""#!/bin/sh
@@ -338,6 +340,25 @@ class DaemonStartupTests(FakeDaemonTestCase):
         self.assertFalse(started)
         self.assertIn("failed to start virtiofsd", stderr.getvalue())
 
+    def test_falls_back_to_9p_when_the_daemon_dies_before_the_socket(self):
+        # An exited daemon must not be waited for until the timeout.
+        self.make_daemon(self.daemon, role="exit")
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            _, started = self.start_daemon(_rootfs_config(), verbose=True)
+        self.assertFalse(started)
+        self.assertIn("failed to start virtiofsd", stderr.getvalue())
+
+    def test_falls_back_to_9p_when_the_daemon_dies_after_the_socket(self):
+        # The socket path shows up at bind() time: a daemon that dies right
+        # after creating it must not be mistaken for a ready one.
+        self.make_daemon(self.daemon, role="bind-exit")
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            _, started = self.start_daemon(_rootfs_config(), verbose=True)
+        self.assertFalse(started)
+        self.assertIn("failed to start virtiofsd", stderr.getvalue())
+
 
 class IsSocketTests(unittest.TestCase):
     def setUp(self):
@@ -410,22 +431,14 @@ class CleanupTests(FakeDaemonTestCase):
     def test_stops_the_daemon_and_removes_its_temp_files(self):
         fs, started = self.start_daemon(_rootfs_config())
         self.assertTrue(started)
-        with open(fs.pid, encoding="utf-8") as fd:
-            pid = int(fd.read())
 
         fs._cleanup_virtiofs_temp_files()
 
-        # The daemon is not the cleanup's child: give it a moment to die.
-        for _ in range(100):
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
-                break
-            time.sleep(0.05)
-        else:
-            self.fail("the daemon is still running")
+        # The daemon was told to stop and is gone, together with its files.
+        fs.proc.wait(timeout=5)
+        self.assertLess(fs.proc.returncode, 0)
         self.assertFalse(os.path.exists(fs.sock))
-        self.assertFalse(os.path.exists(fs.pid))
+        self.assertFalse(os.path.exists(fs.sock + ".pid"))
 
 
 if __name__ == "__main__":
