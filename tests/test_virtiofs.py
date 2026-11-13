@@ -171,14 +171,7 @@ printf '%s\\0' '@@run@@' "$0" "$@" >> {shlex.quote(path + ".argv")}
                 fs.shutdown()
 
         self.addCleanup(cleanup)
-        started = fs.start(
-            config.path,
-            verbose=verbose,
-            cache="auto" if config.rw else "always",
-            posix_acl=config.posix_acl,
-            readonly=config.readonly,
-        )
-        return fs, started
+        return fs, fs.start(config, verbose=verbose)
 
 
 class VirtioFSConfigTests(unittest.TestCase):
