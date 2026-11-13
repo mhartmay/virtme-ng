@@ -275,6 +275,15 @@ class DaemonSelectionTests(FakeDaemonTestCase):
             _, started = self.start_daemon(_rootfs_config())
         self.assertFalse(started)
 
+    def test_reports_a_usable_daemon_without_starting_it(self):
+        self.assertTrue(VirtioFS(self.guest_tools).is_virtiofsd_available())
+        self.assertEqual(self.daemon_runs(self.daemon), [])
+
+    def test_reports_no_usable_daemon(self):
+        os.unlink(self.daemon)
+        with no_system_virtiofsd():
+            self.assertFalse(VirtioFS(self.guest_tools).is_virtiofsd_available())
+
 
 class DaemonStartupTests(FakeDaemonTestCase):
     def test_passes_the_export_options_to_the_daemon(self):

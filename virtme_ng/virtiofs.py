@@ -38,6 +38,13 @@ class VirtioFS:
             except OSError:
                 pass
 
+    def is_virtiofsd_available(self) -> bool:
+        """Whether a usable virtiofsd binary is installed.
+
+        Unlike start(), this does not attempt to launch the daemon.
+        """
+        return self._get_virtiofsd_path() is not None
+
     def _get_virtiofsd_path(self):
         # Define the possible virtiofsd paths.
         #
