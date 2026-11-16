@@ -163,9 +163,9 @@ printf '%s\\0' '@@run@@' "$0" "$@" >> {shlex.quote(path + ".argv")}
                 return arg.split("=", 1)[1]
         raise AssertionError(f"{flag} not found in {argv}")
 
-    def start_daemon(self, config, verbose=False):
+    def start_daemon(self, config, verbose=False, virtiofsd_path=None):
         """start() the daemon for CONFIG; it is cleaned up afterwards."""
-        fs = VirtioFS(self.guest_tools)
+        fs = VirtioFS(self.guest_tools, virtiofsd_path)
 
         def cleanup():
             if fs.sock is not None:
@@ -287,6 +287,47 @@ class DaemonSelectionTests(FakeDaemonTestCase):
         os.unlink(self.daemon)
         with no_system_virtiofsd():
             self.assertFalse(VirtioFS(self.guest_tools).is_virtiofsd_available())
+
+    def test_uses_an_explicitly_requested_daemon(self):
+        explicit = os.path.join(self.tempdir.name, "custom", "virtiofsd")
+        self.make_daemon(explicit)
+        _, started = self.start_daemon(_rootfs_config(), virtiofsd_path=explicit)
+        self.assertTrue(started)
+        (argv,) = self.daemon_runs(explicit)
+        self.assertEqual(argv[0], explicit)
+        # An explicitly requested daemon is the only candidate: the guest
+        # tools one is silently installed, but never used.
+        self.assertEqual(self.daemon_runs(self.daemon), [])
+
+    def test_an_unusable_explicit_daemon_has_no_fallback(self):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            _, started = self.start_daemon(
+                _rootfs_config(), virtiofsd_path="/nonexistent/virtiofsd"
+            )
+        self.assertFalse(started)
+        self.assertEqual(self.daemon_runs(self.daemon), [])
+        self.assertIn("is not a usable virtiofsd", stderr.getvalue())
+
+    def test_an_empty_explicit_daemon_is_an_explicit_request(self):
+        # An empty --virtiofsd (e.g. an unset shell variable) must not
+        # silently re-enable the auto-detection.
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            _, started = self.start_daemon(_rootfs_config(), virtiofsd_path="")
+        self.assertFalse(started)
+        self.assertEqual(self.daemon_runs(self.daemon), [])
+        self.assertIn("is not a usable virtiofsd", stderr.getvalue())
+
+    def test_an_unusable_explicit_daemon_is_reported_only_once(self):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            for _ in range(2):
+                _, started = self.start_daemon(
+                    _rootfs_config(), virtiofsd_path="/nonexistent/virtiofsd"
+                )
+                self.assertFalse(started)
+        self.assertEqual(stderr.getvalue().count("is not a usable virtiofsd"), 1)
 
 
 class DaemonStartupTests(FakeDaemonTestCase):
