@@ -17,6 +17,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+from virtme.commands.run import rootfs_ownership
 from virtme_ng.virtiofs import (
     VirtioFS,
     VirtioFSConfig,
@@ -180,10 +181,26 @@ class VirtioFSConfigTests(unittest.TestCase):
         self.assertFalse(config.rw)
         self.assertTrue(config.readonly)
         self.assertFalse(config.posix_acl)
+        self.assertIsNone(config.translate_uid)
+        self.assertIsNone(config.translate_gid)
 
         config = VirtioFSConfig(path="/", mount_tag="ROOTFS", rw=True)
         self.assertTrue(config.rw)
         self.assertFalse(config.readonly)
+
+    def test_zero_translate_id_is_normalized_to_none(self):
+        # A 0 component is the identity: it must not become an instruction
+        # to pass an identity map to virtiofsd.
+        config = VirtioFSConfig(
+            path="/", mount_tag="ROOTFS", translate_uid=0, translate_gid=1000
+        )
+        self.assertIsNone(config.translate_uid)
+        self.assertEqual(config.translate_gid, 1000)
+        config = VirtioFSConfig(
+            path="/", mount_tag="ROOTFS", translate_uid=1000, translate_gid=0
+        )
+        self.assertEqual(config.translate_uid, 1000)
+        self.assertIsNone(config.translate_gid)
 
     def test_state_defaults(self):
         state = VirtioFSState("/opt/guest-tools")
@@ -334,6 +351,80 @@ class DaemonStartupTests(FakeDaemonTestCase):
         (argv,) = self.daemon_runs(self.daemon)
         self.assertNotIn("--readonly", argv)
 
+    def test_translates_the_guest_root_to_the_rootfs_owner(self):
+        self.make_daemon(
+            self.daemon, help_text="--translate-uid\n--translate-gid\n--readonly"
+        )
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            _, started = self.start_daemon(
+                _rootfs_config(posix_acl=True, translate_uid=1234, translate_gid=5678)
+            )
+        self.assertTrue(started)
+        (argv,) = self.daemon_runs(self.daemon)
+        self.assertIn("--translate-uid=map:0:1234:1", argv)
+        self.assertIn("--translate-gid=map:0:5678:1", argv)
+        # UID/GID translation cannot be combined with POSIX ACLs.
+        self.assertNotIn("--posix-acl", argv)
+        self.assertIn("mapping guest root", stderr.getvalue())
+        self.assertIn("disabling POSIX ACLs", stderr.getvalue())
+
+    def test_translate_dropped_when_not_advertised(self):
+        # No translate flags in the --help output: the mapping is not even
+        # attempted, the ACLs are kept and the loss is announced.
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            _, started = self.start_daemon(
+                _rootfs_config(posix_acl=True, translate_uid=1000, translate_gid=1000)
+            )
+        self.assertTrue(started)
+        (argv,) = self.daemon_runs(self.daemon)
+        self.assertFalse(any(arg.startswith("--translate") for arg in argv))
+        self.assertIn("--posix-acl", argv)
+        self.assertIn(
+            "does not support --translate-uid/--translate-gid", stderr.getvalue()
+        )
+
+    def test_missing_translate_flag_is_named_in_the_warning(self):
+        self.make_daemon(self.daemon, help_text="--translate-uid")
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            _, started = self.start_daemon(
+                _rootfs_config(translate_uid=1000, translate_gid=1000)
+            )
+        self.assertTrue(started)
+        (argv,) = self.daemon_runs(self.daemon)
+        self.assertFalse(any(arg.startswith("--translate") for arg in argv))
+        self.assertIn("does not support --translate-gid", stderr.getvalue())
+
+    def test_lost_mapping_is_announced_with_the_9p_fallback(self):
+        # A requested mapping that is lost with the fallback changes what
+        # the guest sees: it is announced even when not verbose.
+        self.make_daemon(
+            self.daemon, help_text="--translate-uid\n--translate-gid", role="hang"
+        )
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            _, started = self.start_daemon(
+                _rootfs_config(translate_uid=1000, translate_gid=1000)
+            )
+        self.assertFalse(started)
+        self.assertIn("fallback to 9p", stderr.getvalue())
+        self.assertIn("not mapped to the rootfs owner", stderr.getvalue())
+
+    def test_lost_mapping_is_announced_without_a_usable_daemon(self):
+        # No usable virtiofsd at all: there is no daemon to probe for the
+        # translate options, but the loss is announced anyway.
+        os.unlink(self.daemon)
+        stderr = io.StringIO()
+        with no_system_virtiofsd(), contextlib.redirect_stderr(stderr):
+            _, started = self.start_daemon(
+                _rootfs_config(translate_uid=1000, translate_gid=1000)
+            )
+        self.assertFalse(started)
+        self.assertIn("fallback to 9p", stderr.getvalue())
+        self.assertIn("not mapped to the rootfs owner", stderr.getvalue())
+
     def test_falls_back_to_9p_when_the_daemon_never_becomes_ready(self):
         self.make_daemon(self.daemon, role="hang")
         stderr = io.StringIO()
@@ -402,6 +493,23 @@ class ExportVirtiofsTests(FakeDaemonTestCase):
         self.assertEqual(qemuargs, [])
         self.assertEqual(self.daemon_runs(self.daemon), [])
 
+    def test_without_virtiofs_support_announces_the_lost_mapping(self):
+        # start() is never reached without virtiofs support: a lost mapping
+        # has to be announced by export_virtiofs() itself.
+        qemuargs = []
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            self.assertFalse(
+                export_virtiofs(
+                    FakeArch(virtiofs=False),
+                    qemuargs,
+                    VirtioFSState(self.guest_tools),
+                    _rootfs_config(translate_uid=1000, translate_gid=1000),
+                )
+            )
+        self.assertEqual(qemuargs, [])
+        self.assertIn("not mapped to the rootfs owner", stderr.getvalue())
+
     def test_falls_back_to_9p_without_a_usable_daemon(self):
         os.unlink(self.daemon)
         qemuargs = []
@@ -427,6 +535,104 @@ class ExportVirtiofsTests(FakeDaemonTestCase):
         self.assertIn("memory-backend-memfd,id=mem,size=128M,share=on", qemuargs)
         self.assertIn("-numa", qemuargs)
         self.assertTrue(state.memory_configured)
+
+
+class RootfsOwnershipTests(unittest.TestCase):
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+
+    @staticmethod
+    def _stat_as(uid, gid):
+        # Ownership cannot be faked with real files without root.
+        st = mock.MagicMock()
+        st.st_uid = uid
+        st.st_gid = gid
+        return mock.patch("virtme.commands.run.os.stat", return_value=st)
+
+    def test_returns_owner(self):
+        for owner in ((1000, 1000), (0, 0), (1001, 1000), (1000, 1001), (1001, 1001)):
+            with self.subTest(owner=owner), self._stat_as(*owner):
+                self.assertEqual(rootfs_ownership(self.tempdir.name), owner)
+
+    def test_mixed_ownership_rootfs_returns_none(self):
+        # The top-level directory belongs to the user, but not its content.
+        os.mkdir(os.path.join(self.tempdir.name, "usr"))
+        foreign = mock.MagicMock(st_uid=0, st_gid=0, st_mode=stat.S_IFDIR)
+        with (
+            self._stat_as(1000, 1000),
+            mock.patch("virtme.commands.run.os.lstat", return_value=foreign),
+        ):
+            self.assertIsNone(rootfs_ownership(self.tempdir.name))
+
+    def test_uniformly_owned_rootfs_returns_owner(self):
+        os.mkdir(os.path.join(self.tempdir.name, "usr"))
+        owned = mock.MagicMock(st_uid=1000, st_gid=1000, st_mode=stat.S_IFDIR)
+        with (
+            self._stat_as(1000, 1000),
+            mock.patch("virtme.commands.run.os.lstat", return_value=owned),
+        ):
+            self.assertEqual(rootfs_ownership(self.tempdir.name), (1000, 1000))
+
+    def test_root_owned_symlink_does_not_defeat_detection(self):
+        # A `chown -R` without `-h` leaves the merged-usr symlinks (bin,
+        # sbin, lib) behind as root-owned; their ownership must not
+        # disable the mapping of a user-owned rootfs.
+        root_owned_symlink = mock.MagicMock(st_uid=0, st_gid=0, st_mode=stat.S_IFLNK)
+        user_owned_dir = mock.MagicMock(st_uid=1000, st_gid=1000, st_mode=stat.S_IFDIR)
+
+        def fake_lstat(path):
+            if os.path.basename(path) in ("bin", "sbin", "lib"):
+                return root_owned_symlink
+            return user_owned_dir
+
+        with (
+            self._stat_as(1000, 1000),
+            mock.patch("virtme.commands.run.os.lstat", side_effect=fake_lstat),
+        ):
+            self.assertEqual(rootfs_ownership(self.tempdir.name), (1000, 1000))
+
+    def test_missing_path_returns_none(self):
+        path = os.path.join(self.tempdir.name, "nonexistent")
+        self.assertIsNone(rootfs_ownership(path))
+
+
+class TranslateOwnerPermissionTests(unittest.TestCase):
+    # The identity of the invoking user cannot be faked without root.
+
+    def test_root_may_translate_any_owner(self):
+        with mock.patch("virtme_ng.virtiofs.os.getuid", return_value=0):
+            for owner in ((1000, 1000), (1234, 5678), (0, 1000), (1000, 0), (0, 0)):
+                with self.subTest(owner=owner):
+                    self.assertTrue(VirtioFS.may_translate_owner(owner))
+
+    def test_unprivileged_user_may_translate_own_and_zero_components(self):
+        with (
+            mock.patch("virtme_ng.virtiofs.os.getuid", return_value=1000),
+            mock.patch("virtme_ng.virtiofs.os.getgid", return_value=1000),
+            mock.patch("virtme_ng.virtiofs.os.getgroups", return_value=[1000]),
+        ):
+            for owner in ((1000, 1000), (1000, 0), (0, 1000), (0, 0)):
+                with self.subTest(owner=owner):
+                    self.assertTrue(VirtioFS.may_translate_owner(owner))
+
+    def test_unprivileged_user_may_translate_supplementary_group(self):
+        with (
+            mock.patch("virtme_ng.virtiofs.os.getuid", return_value=1000),
+            mock.patch("virtme_ng.virtiofs.os.getgid", return_value=1000),
+            mock.patch("virtme_ng.virtiofs.os.getgroups", return_value=[1000, 500]),
+        ):
+            self.assertTrue(VirtioFS.may_translate_owner((1000, 500)))
+
+    def test_unprivileged_user_may_not_translate_foreign_owner(self):
+        with (
+            mock.patch("virtme_ng.virtiofs.os.getuid", return_value=1000),
+            mock.patch("virtme_ng.virtiofs.os.getgid", return_value=1000),
+            mock.patch("virtme_ng.virtiofs.os.getgroups", return_value=[1000]),
+        ):
+            for owner in ((1001, 1000), (1000, 1001), (1001, 1001), (1234, 5678)):
+                with self.subTest(owner=owner):
+                    self.assertFalse(VirtioFS.may_translate_owner(owner))
 
 
 class CleanupTests(FakeDaemonTestCase):
