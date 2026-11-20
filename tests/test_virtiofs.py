@@ -17,7 +17,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from virtme.commands.run import rootfs_ownership
+from virtme.commands.run import make_parser, rootfs_ownership
 from virtme_ng.virtiofs import (
     VirtioFS,
     VirtioFSConfig,
@@ -369,6 +369,21 @@ class DaemonStartupTests(FakeDaemonTestCase):
         self.assertIn("mapping guest root", stderr.getvalue())
         self.assertIn("disabling POSIX ACLs", stderr.getvalue())
 
+    def test_without_translation_the_acls_are_kept(self):
+        # What --no-root-uid-map asks for: the guest root is not mapped to
+        # the rootfs owner, the POSIX ACLs are kept and nothing is announced.
+        self.make_daemon(
+            self.daemon, help_text="--translate-uid\n--translate-gid\n--readonly"
+        )
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            _, started = self.start_daemon(_rootfs_config(posix_acl=True))
+        self.assertTrue(started)
+        (argv,) = self.daemon_runs(self.daemon)
+        self.assertIn("--posix-acl", argv)
+        self.assertFalse(any(arg.startswith("--translate") for arg in argv))
+        self.assertEqual(stderr.getvalue(), "")
+
     def test_translate_dropped_when_not_advertised(self):
         # No translate flags in the --help output: the mapping is not even
         # attempted, the ACLs are kept and the loss is announced.
@@ -647,6 +662,18 @@ class CleanupTests(FakeDaemonTestCase):
         self.assertLess(fs.proc.returncode, 0)
         self.assertFalse(os.path.exists(fs.sock))
         self.assertFalse(os.path.exists(fs.sock + ".pid"))
+
+
+class NoRootUidMapCliTests(unittest.TestCase):
+    def test_parser_defaults_to_false(self):
+        parser = make_parser()
+        args = parser.parse_args(["--mods", "none"])
+        self.assertFalse(args.no_root_uid_map)
+
+    def test_parser_accepts_flag(self):
+        parser = make_parser()
+        args = parser.parse_args(["--mods", "none", "--no-root-uid-map"])
+        self.assertTrue(args.no_root_uid_map)
 
 
 if __name__ == "__main__":
