@@ -54,6 +54,7 @@ class VirtioFSConfig:
         posix_acl: bool = False,
         translate_uid: int | None = None,
         translate_gid: int | None = None,
+        translate_desc: str | None = None,
     ):
         self.path = path
         self.mount_tag = mount_tag
@@ -63,10 +64,31 @@ class VirtioFSConfig:
         # uid/gid): normalize it away.
         self.translate_uid = translate_uid if translate_uid != 0 else None
         self.translate_gid = translate_gid if translate_gid != 0 else None
+        # What the guest root is mapped to, for the messages (e.g. "the
+        # owner of the rootfs"); the ids are always part of them.
+        self.translate_desc = translate_desc
 
     @property
     def readonly(self) -> bool:
         return not self.rw
+
+    @property
+    def translate_target(self) -> str | None:
+        """The guest root's mapping target as used in the messages.
+
+        None when the guest root is not mapped at all.
+        """
+        parts = []
+        if self.translate_uid is not None:
+            parts.append(f"uid {self.translate_uid}")
+        if self.translate_gid is not None:
+            parts.append(f"gid {self.translate_gid}")
+        if not parts:
+            return None
+        target = ", ".join(parts)
+        if self.translate_desc:
+            target = f"{self.translate_desc} ({target})"
+        return target
 
 
 class VirtioFSState:
@@ -243,24 +265,21 @@ class VirtioFS:
             return False
         return owner_gid in (0, os.getgid(), *os.getgroups())
 
-    def _report_9p_fallback(self, verbose, uid_mapped=False):
+    def _report_9p_fallback(self, verbose, target=None):
         # A lost UID mapping changes what the guest sees: always announce it.
-        if verbose or uid_mapped:
+        if verbose or target:
             sys.stderr.write("virtme-run: failed to start virtiofsd, fallback to 9p\n")
-        if uid_mapped:
-            sys.stderr.write(
-                "virtme-run: the guest root is not mapped to the rootfs owner\n"
-            )
+        if target:
+            sys.stderr.write(f"virtme-run: the guest root is not mapped to {target}\n")
 
     def start(self, config: VirtioFSConfig, verbose=True):
         translate_opt = []
-        has_translation = (
-            config.translate_uid is not None or config.translate_gid is not None
-        )
+        # What the guest root is mapped to, as used in the messages.
+        target = config.translate_target
 
         virtiofsd_path = self._get_virtiofsd_path()
         if virtiofsd_path is None:
-            self._report_9p_fallback(verbose, uid_mapped=has_translation)
+            self._report_9p_fallback(verbose, target)
             return False
 
         # virtiofsd located, try to start the daemon as non-privileged user.
@@ -281,7 +300,7 @@ class VirtioFS:
         # which causes authentication failures (e.g., unix_chkpwd cannot obtain
         # user info).
         acl_opt = ["--posix-acl"] if config.posix_acl else []
-        if has_translation:
+        if target is not None:
             wanted = []
             if config.translate_uid is not None:
                 wanted.append(("--translate-uid", config.translate_uid))
@@ -296,7 +315,7 @@ class VirtioFS:
                 )
                 sys.stderr.write(
                     f"virtme-run: virtiofsd does not support {missing}; "
-                    "the guest root is not mapped to the rootfs owner\n"
+                    f"the guest root is not mapped to {target}\n"
                 )
             else:
                 # UID/GID translation cannot be combined with POSIX ACLs:
@@ -306,16 +325,8 @@ class VirtioFS:
                         "virtme-run: disabling POSIX ACLs for UID/GID translation\n"
                     )
                     acl_opt = []
-                translate_opt = [f"{flag}=map:0:{target}:1" for flag, target in wanted]
-                parts = []
-                if config.translate_uid is not None:
-                    parts.append(f"uid {config.translate_uid}")
-                if config.translate_gid is not None:
-                    parts.append(f"gid {config.translate_gid}")
-                sys.stderr.write(
-                    f"virtme-run: mapping guest root to the owner of the "
-                    f"rootfs ({', '.join(parts)})\n"
-                )
+                translate_opt = [f"{flag}=map:0:{host}:1" for flag, host in wanted]
+                sys.stderr.write(f"virtme-run: mapping guest root to {target}\n")
         readonly_opt = (
             ["--readonly"]
             if config.readonly and self._supports_readonly(virtiofsd_path)
@@ -350,14 +361,14 @@ class VirtioFS:
             )
         except OSError:
             # The caller expects a graceful fallback to 9p, not an exception.
-            self._report_9p_fallback(verbose, bool(translate_opt))
+            self._report_9p_fallback(verbose, target if translate_opt else None)
             return False
         deadline = monotonic() + 3.1
         waiting_logged = False
         while not self._is_socket(self.sock):
             remaining = deadline - monotonic()
             if remaining <= 0 or self.proc.poll() is not None:
-                self._report_9p_fallback(verbose, bool(translate_opt))
+                self._report_9p_fallback(verbose, target if translate_opt else None)
                 return False
             if verbose and not waiting_logged:
                 sys.stderr.write("virtme: waiting for virtiofsd to start\n")
@@ -366,7 +377,7 @@ class VirtioFS:
         # The socket path shows up at bind() time: a daemon that exits right
         # after creating it must not be mistaken for a ready one.
         if self.proc.poll() is not None:
-            self._report_9p_fallback(verbose, bool(translate_opt))
+            self._report_9p_fallback(verbose, target if translate_opt else None)
             return False
         return True
 
@@ -398,10 +409,10 @@ def export_virtiofs(
     if not arch.virtiofs_support():
         # start() is never reached without virtiofs support, so a lost
         # mapping has to be announced here.
-        if config.translate_uid is not None or config.translate_gid is not None:
+        if config.translate_target is not None:
             sys.stderr.write(
                 "virtme-run: no virtiofs support on this architecture: "
-                "the guest root is not mapped to the rootfs owner\n"
+                f"the guest root is not mapped to {config.translate_target}\n"
             )
         return False
 

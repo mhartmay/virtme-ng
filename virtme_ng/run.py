@@ -358,8 +358,9 @@ virtme-ng is based on virtme, written by Andy Lutomirski <luto@kernel.org>.
         "--no-root-uid-map",
         action="store_true",
         help=(
-            "Do not map the guest root to the owner of a user-owned root "
-            "filesystem (ignored with 9p or --root-disk)"
+            "Do not map the guest root to the rootfs owner or, for an "
+            "unprivileged virtiofsd, to the invoking user (ignored with 9p "
+            "or --root-disk)"
         ),
     )
 

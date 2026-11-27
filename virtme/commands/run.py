@@ -172,8 +172,9 @@ def make_parser() -> "VirtmeArgumentParser":
         "--no-root-uid-map",
         action="store_true",
         help=(
-            "Do not map the guest root to the owner of a user-owned root "
-            "filesystem (ignored with 9p or --root-disk)"
+            "Do not map the guest root to the rootfs owner or, for an "
+            "unprivileged virtiofsd, to the invoking user (ignored with 9p "
+            "or --root-disk)"
         ),
     )
     g.add_argument(
@@ -1116,6 +1117,39 @@ def rootfs_ownership(path: str) -> tuple[int, int] | None:
     return owner
 
 
+def guest_root_translation(path: str, owner_desc: str) -> tuple[int, int, str] | None:
+    """Resolve what the guest root is mapped to for the export at PATH.
+
+    Return the (uid, gid, description) to hand to virtiofsd's UID/GID
+    translation, or None when the guest root must not be mapped at all.
+    OWNER_DESC names the directory's owner in the messages ("the owner of
+    the rootfs", "the owner of the shared directory").
+
+    A directory uniformly owned by a single user is exported with the
+    guest root mapped to that owner, so that the guest root matches the
+    ownership of the files. A root-owned (or mixed-ownership) directory
+    exported by an unprivileged virtiofsd cannot keep the guest root's
+    identity anyway: the daemon creates its files as the invoking user, so
+    the guest root is mapped to that user instead, which keeps the
+    ownership consistent in both directions (files created by the guest
+    root show up as root-owned in the guest again).
+    """
+    owner = rootfs_ownership(path)
+    if owner is not None and owner != (0, 0):
+        if VirtioFS.may_translate_owner(owner):
+            return (*owner, owner_desc)
+        owner_uid, owner_gid = owner
+        sys.stderr.write(
+            f"virtme-run: {path} is owned by uid {owner_uid}, gid {owner_gid}, "
+            f"but virtme-ng runs as uid {os.getuid()}, gid {os.getgid()}: "
+            f"the guest root is not mapped to {owner_desc}\n"
+        )
+        return None
+    if os.getuid() != 0:
+        return (os.getuid(), os.getgid(), "the invoking user")
+    return None
+
+
 def detect_disk_format(path: str, verbose: bool = False) -> str:
     """Return the QEMU image format of PATH, defaulting to raw."""
     try:
@@ -1635,20 +1669,13 @@ def do_it() -> int:
         else:
             virt_arch = arch
         if args.root_disk is None:
-            translate_uid = None
-            translate_gid = None
+            translate_uid = translate_gid = translate_desc = None
             if not args.no_root_uid_map:
-                owner = rootfs_ownership(args.root)
-                if owner is not None and owner != (0, 0):
-                    if VirtioFS.may_translate_owner(owner):
-                        translate_uid, translate_gid = owner
-                    else:
-                        owner_uid, owner_gid = owner
-                        sys.stderr.write(
-                            f"virtme-run: rootfs is owned by uid {owner_uid}, gid {owner_gid}, "
-                            f"but virtme-ng runs as uid {os.getuid()}, gid {os.getgid()}: "
-                            "the guest root is not mapped to the rootfs owner\n"
-                        )
+                translation = guest_root_translation(
+                    args.root, owner_desc="the owner of the rootfs"
+                )
+                if translation is not None:
+                    translate_uid, translate_gid, translate_desc = translation
             virtiofs_config = VirtioFSConfig(
                 path=args.root,
                 mount_tag="ROOTFS",
@@ -1660,6 +1687,7 @@ def do_it() -> int:
                 posix_acl=(has_external_root(args) and not args.no_root_posix_acl),
                 translate_uid=translate_uid,
                 translate_gid=translate_gid,
+                translate_desc=translate_desc,
             )
             use_virtiofs = export_virtiofs(
                 virt_arch,

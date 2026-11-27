@@ -886,9 +886,16 @@ Troubleshooting
    generated as a regular user with mkosi) is exported with the guest root
    mapped to that user, so that the guest root matches the ownership of the
    files. When running as root (e.g. with `sudo`), a root filesystem entirely
-   owned by a single non-root user is mapped the same way. This drops the POSIX
-   ACLs of the root virtiofs export, and files below the top level that are
-   owned by someone else show up as `nobody` in the guest. To keep the previous
+   owned by a single non-root user is mapped the same way. When running as a
+   regular user, a root-owned root filesystem (typically the host root) is
+   exported with the guest root mapped to the invoking user instead: an
+   unprivileged virtiofsd creates the guest root's files as that user, and
+   without the mapping the guest would see them as owned by the user's uid,
+   which breaks tools that expect files created by root to be root-owned
+   (e.g. `perf` refuses its `perf.data`, `tcpdump` cannot chown its savefile).
+   The mapping drops the POSIX ACLs of the root virtiofs export, and files
+   below the top level that are owned by someone else show up as `nobody`
+   in the guest. To keep the previous
    ownership view, disable the mapping with `--no-root-uid-map`.
 
  - If you get permission denied when starting qemu, make sure that your
