@@ -898,6 +898,12 @@ Troubleshooting
    in the guest. To keep the previous
    ownership view, disable the mapping with `--no-root-uid-map`.
 
+ - Directories shared with `--rwdir` or `--rodir` are mapped the same way
+   (the guest root to the directory's owner, or to the invoking user when
+   virtme-ng runs unprivileged and the directory is root-owned), so that
+   files the guest root creates in a shared directory also show up as
+   root-owned. `--no-root-uid-map` disables this mapping as well.
+
  - If you get permission denied when starting qemu, make sure that your
    username is assigned to the group `kvm` or `libvirt`:
    ```console

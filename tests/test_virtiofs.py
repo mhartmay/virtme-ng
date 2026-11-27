@@ -17,7 +17,12 @@ import tempfile
 import unittest
 from unittest import mock
 
-from virtme.commands.run import guest_root_translation, make_parser, rootfs_ownership
+from virtme.commands.run import (
+    export_hostfs,
+    guest_root_translation,
+    make_parser,
+    rootfs_ownership,
+)
 from virtme_ng.virtiofs import (
     VirtioFS,
     VirtioFSConfig,
@@ -611,6 +616,50 @@ class ExportVirtiofsTests(FakeDaemonTestCase):
         self.assertIn("memory-backend-memfd,id=mem,size=128M,share=on", qemuargs)
         self.assertIn("-numa", qemuargs)
         self.assertTrue(state.memory_configured)
+
+
+class ExportHostfsTests(FakeDaemonTestCase):
+    """The guest root mapping resolved for a shared dir reaches its daemon."""
+
+    def _export(self, translate):
+        self.make_daemon(
+            self.daemon, help_text="--translate-uid\n--translate-gid\n--readonly"
+        )
+        qemuargs = []
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            fstype = export_hostfs(
+                qemu=mock.Mock(),
+                arch=FakeArch(),
+                qemuargs=qemuargs,
+                virtiofs_state=VirtioFSState(self.guest_tools),
+                path="/home/user/temp",
+                mount_tag="virtme.initmount0",
+                readonly=False,
+                translate=translate,
+            )
+        return fstype, stderr.getvalue()
+
+    def test_the_translation_is_passed_to_the_daemon(self):
+        fstype, stderr = self._export((1000, 1000, "the owner of the shared directory"))
+        self.assertEqual(fstype, "virtiofs")
+        (argv,) = self.daemon_runs(self.daemon)
+        self.assertIn("--translate-uid=map:0:1000:1", argv)
+        self.assertIn("--translate-gid=map:0:1000:1", argv)
+        self.assertIn(
+            "mapping guest root to the owner of the shared directory "
+            "(uid 1000, gid 1000)",
+            stderr,
+        )
+
+    def test_without_a_translation_no_flags_are_passed(self):
+        # The internal exports (guest tools, modules, ...) share no guest
+        # root mapping: nothing must be announced or passed to the daemon.
+        fstype, stderr = self._export(None)
+        self.assertEqual(fstype, "virtiofs")
+        (argv,) = self.daemon_runs(self.daemon)
+        self.assertFalse(any(arg.startswith("--translate") for arg in argv))
+        self.assertEqual(stderr, "")
 
 
 class RootfsOwnershipTests(unittest.TestCase):

@@ -906,12 +906,21 @@ def export_hostfs(  # pylint: disable=R0917
     mount_tag: str,
     readonly=True,
     verbose=False,
+    translate: tuple[int, int, str] | None = None,
 ) -> str:
+    """Export PATH to the guest, preferring virtiofs over 9p.
+
+    TRANSLATE is the guest root mapping for this export, as resolved by
+    guest_root_translation(), or None when the guest root is not mapped.
+    """
     if virtiofs_state is not None:
         virtiofs_config = VirtioFSConfig(
             path=path,
             mount_tag=mount_tag,
             rw=not readonly,
+            translate_uid=translate[0] if translate else None,
+            translate_gid=translate[1] if translate else None,
+            translate_desc=translate[2] if translate else None,
         )
         if export_virtiofs(arch, qemuargs, virtiofs_state, virtiofs_config, verbose):
             return "virtiofs"
@@ -1963,6 +1972,13 @@ def do_it() -> int:
         mount_index += 1
         tag = f"virtme.initmount{idx}"
         readonly = dirtype != "rwdir"
+        # Resolve the guest root mapping only when it can be applied: with
+        # 9p forced there is no virtiofsd to translate anything.
+        translation = None
+        if virtiofs_state is not None and not args.no_root_uid_map:
+            translation = guest_root_translation(
+                hostpath, owner_desc="the owner of the shared directory"
+            )
         fstype = export_hostfs(
             qemu,
             arch,
@@ -1972,6 +1988,7 @@ def do_it() -> int:
             mount_tag=tag,
             readonly=readonly,
             verbose=args.verbose,
+            translate=translation,
         )
         kernelargs.append(f"virtme_initmount{idx}={guestpath}")
         kernelargs.append(f"virtme_initmount{idx}_fstype={fstype}")
